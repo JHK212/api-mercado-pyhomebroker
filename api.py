@@ -307,6 +307,7 @@ import pandas as pd
 @app.get("/options/test_greeks")
 def test_greeks():
     # DataFrame simulado con columnas mínimas
+    import pandas as pd
     data = {
         "strike": [9000],
         "last": [120.5],
