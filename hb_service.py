@@ -121,7 +121,7 @@ class HBService:
                     return
                     
                 this_data = quotes.copy()
-                this_data = this_data.drop(["expiration", "strike", "kind"], axis=1, errors='ignore')
+                # this_data = this_data.drop(["expiration", "strike", "kind"], axis=1, errors='ignore')
                 this_data["change"] = this_data["change"] / 100
                 this_data["datetime"] = pd.to_datetime(this_data["datetime"])
                 this_data = this_data.rename(columns={"bid_size": "bidsize", "ask_size": "asksize"})
@@ -480,6 +480,182 @@ class HBService:
                 "reconnect_interval": self.reconnect_interval,
                 "health_check_interval": self.health_check_interval
             }
+            
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from greeks import implied_vol, bs_greeks
+
+    TZ = ZoneInfo("America/Argentina/Buenos_Aires")
+
+    # -----------------------
+    # Cálculo de tasas y subyacentes
+    # -----------------------
+   
+    def _get_caucion_1d_rate(self) -> Optional[float]:
+        """
+        Devuelve tasa de caución '1D' aprox a partir de self.cauciones.
+        Asumimos que la fila con menor settlement es la de menor plazo.
+        """
+        if self.cauciones.empty:
+            return None
+        
+        # self.cauciones tiene índice = settlement (fecha)
+        df = self.cauciones.copy()
+        df = df.sort_index()  # la primera es la de plazo más corto
+        row = df.iloc[0]
+        
+        # En _on_repos hiciste: last, bid_rate, ask_rate ya en decimales
+        # Last suele ser tasa promedio/cierre
+        rate = row.get("last")
+        if rate is None:
+            # fallback: usar bid_rate o ask_rate
+            rate = row.get("bid_rate") or row.get("ask_rate")
+        
+        if rate is None:
+            return None
+        
+        # rate viene en decimales (ej 0.80 = 80% anual)
+        return float(rate)
+
+    def _get_underlying_price(self, option_symbol: str) -> Optional[float]:
+        """
+        Estima el ticker del subyacente a partir del símbolo de la opción y devuelve su last.
+        
+        💡 Esto depende de tu convención de símbolos. Acá te dejo una heurística:
+        - Toma las primeras 4 letras del símbolo como prefijo (ej: GFGC -> GGAL, YPFC -> YPF)
+        - Las mapea a un ticker real.
+        """
+        if not option_symbol:
+            return None
+        
+        sym = str(option_symbol).upper()
+        pref = sym[:4]  # Ej 'GFGC', 'YPFC', etc.
+
+        # 📝 TODO: ajustar este mapping a tu realidad (puede ir a partir de tickers.json)
+        mapping = {
+            "GFGC": "GGAL",
+            "GFGV": "GGAL",
+            "YPFC": "YPFD",
+            # Agregar más mappings...
+        }
+        
+        underlying_ticker = mapping.get(pref)
+        if not underlying_ticker:
+            return None
+        
+        # Usamos get_stocks para encontrar el subyacente
+        stocks_df = self.get_stocks(ticker=underlying_ticker)
+        if stocks_df.empty:
+            return None
+        
+        # Tomamos cualquiera (de 24hs o SPOT), preferentemente 24hs
+        # El index tiene formato 'GGAL - 24hs' / 'GGAL - SPOT'
+        # Nos quedamos con el primero
+        row = stocks_df.iloc[0]
+        last = row.get("last")
+        return float(last) if last is not None else None
+
+    def _attach_greeks(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Devuelve un DataFrame con columnas extra:
+        underlying_price, iv, delta, gamma, vega, theta.
+        """
+        if df.empty:
+            return df
+        
+        df = df.copy()
+        now = datetime.now(TZ)
+        r = self._get_caucion_1d_rate() or 0.0  # si no hay tasa, usamos 0
+        
+        # Preparamos nuevas columnas
+        df["underlying_price"] = None
+        df["iv"] = None
+        df["delta"] = None
+        df["gamma"] = None
+        df["vega"] = None
+        df["theta"] = None
+        
+        # Aseguramos que expiration esté como datetime
+        if "expiration" in df.columns:
+            df["expiration"] = pd.to_datetime(df["expiration"], errors="coerce")
+        
+        for idx, row in df.iterrows():
+            try:
+                symbol = str(idx)
+                last = row.get("last")
+                bid = row.get("bid")
+                ask = row.get("ask")
+                strike = row.get("strike")
+                expiration = row.get("expiration")
+                kind = row.get("kind")  # Puede ser 'CALL' / 'PUT' / 'C' / 'V'
+                
+                # Precio subyacente S
+                S = self._get_underlying_price(symbol)
+                if S is None or S <= 0:
+                    continue
+                
+                # Strike
+                if strike is None or strike <= 0:
+                    continue
+                K = float(strike)
+                
+                # Tiempo a vencimiento T en años
+                if expiration is None or pd.isna(expiration):
+                    continue
+                exp_dt = expiration.to_pydatetime().replace(tzinfo=TZ)
+                days = (exp_dt - now).total_seconds() / 86400.0
+                if days <= 0:
+                    continue
+                T = days / 365.0
+                
+                # Tipo de opción
+                if isinstance(kind, str):
+                    k = kind.upper()
+                    if k.startswith("C"):
+                        opt_type = "C"
+                    else:
+                        opt_type = "P"
+                else:
+                    # fallback: inferir del símbolo (último carácter?)
+                    opt_type = "C" if symbol.endswith("C") else "P"
+                
+                # Precio para IV: preferimos mid, después last
+                price_for_iv = None
+                if bid is not None and ask is not None and bid > 0 and ask > 0:
+                    price_for_iv = 0.5 * (float(bid) + float(ask))
+                elif last is not None and last > 0:
+                    price_for_iv = float(last)
+                
+                if price_for_iv is None:
+                    continue
+                
+                # Calcular IV
+                sigma = implied_vol(price_for_iv, S, K, T, r, opt_type)
+                if sigma is None:
+                    continue
+                
+                greeks = bs_greeks(S, K, T, r, sigma, opt_type)
+                
+                df.at[idx, "underlying_price"] = S
+                df.at[idx, "iv"] = sigma
+                df.at[idx, "delta"] = greeks["delta"]
+                df.at[idx, "gamma"] = greeks["gamma"]
+                df.at[idx, "vega"] = greeks["vega"]
+                df.at[idx, "theta"] = greeks["theta"]
+            
+            except Exception as e:
+                logger.error(f"Error calculando griegas para {idx}: {e}")
+                continue
+        
+        return df
+
+    def get_options_with_greeks(self, prefix: Optional[str] = None,
+                                ticker: Optional[str] = None) -> pd.DataFrame:
+        """
+        Igual que get_options, pero con columnas de subyacente + IV + griegas.
+        """
+        base_df = self.get_options(prefix=prefix, ticker=ticker)
+        return self._attach_greeks(base_df)
 
 
 # Instancia singleton para usar desde la API
