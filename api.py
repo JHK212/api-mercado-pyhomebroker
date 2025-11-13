@@ -94,7 +94,11 @@ def health():
 @app.get("/options")
 def get_options(
     prefix: Optional[str] = Query(None, description="Filtrar opciones por prefijo"),
-    ticker: Optional[str] = Query(None, description="Filtrar opciones por ticker específico")
+    ticker: Optional[str] = Query(None, description="Filtrar opciones por ticker específico"),
+    with_greeks: bool = Query(
+        False,
+        description="Si es true, incluye precio subyacente, IV y griegas (delta, gamma, vega, theta)"
+    )
 ):
     """
     Obtiene todas las opciones o filtra por prefijo/ticker.
@@ -102,12 +106,20 @@ def get_options(
     - Sin parámetros: retorna todas las opciones (aplicando filtros por defecto)
     - prefix: filtra opciones que empiecen con el prefijo (ej: GFG)
     - ticker: filtra opciones por ticker específico
+    - with_greeks: si es true, agrega columnas de IV y griegas
     """
     try:
-        df = hb_service.get_options(prefix=prefix, ticker=ticker)
+        if with_greeks:
+            # 👉 Usa la versión que ya calcula IV y griegas en hb_service
+            df = hb_service.get_options_with_greeks(prefix=prefix, ticker=ticker)
+        else:
+            # 👉 Comportamiento viejo, sin griegas
+            df = hb_service.get_options(prefix=prefix, ticker=ticker)
+        
         return dataframe_to_records(df)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error obteniendo opciones: {str(e)}")
+
 
 
 @app.get("/options/prefix/{prefix}")
