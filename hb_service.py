@@ -18,7 +18,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 👇 DEFINIR TZ A NIVEL GLOBAL (SIN INDENTACIÓN)
 TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 
 # Configurar logging estructurado
