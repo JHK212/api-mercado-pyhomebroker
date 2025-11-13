@@ -8,6 +8,8 @@ from pydantic import BaseModel
 
 from hb_service import hb_service, dataframe_to_records
 
+import pandas as pd
+
 
 load_dotenv()
 
@@ -170,6 +172,35 @@ def get_all_options():
         raise HTTPException(status_code=500, detail=f"Error obteniendo todas las opciones: {str(e)}")
 
 
+@app.get("/options/test_greeks")
+def test_greeks():
+    """
+    Endpoint de prueba: usa una opción fake en un DataFrame
+    y le aplica _attach_greeks para verificar que IV + griegas funcionan.
+    """
+    try:
+        # Datos mínimos simulados para una opción de ejemplo
+        data = {
+            "strike": [9000],
+            "last": [120.5],
+            "bid": [120],
+            "ask": [121],
+            "expiration": [pd.Timestamp("2025-02-28")],
+            "kind": ["CALL"],
+        }
+        df = pd.DataFrame(data)
+        df.index = ["GFGC9000DI"]  # símbolo de opción simulado
+
+        # Usamos la función interna del servicio para adjuntar griegas
+        df_with = hb_service._attach_greeks(df)
+
+        return dataframe_to_records(df_with)
+
+    except Exception as e:
+        # Esto te permite ver el error real en el JSON
+        raise HTTPException(status_code=500, detail=f"Error en test_greeks: {str(e)}")
+
+
 @app.get("/stocks")
 def get_stocks(
     prefix: Optional[str] = Query(None, description="Filtrar acciones por prefijo"),
@@ -302,25 +333,6 @@ def get_cauciones():
         raise HTTPException(status_code=500, detail=f"Error obteniendo cauciones: {str(e)}")
 
 
-import pandas as pd
-
-@app.get("/options/test_greeks")
-def test_greeks():
-    # DataFrame simulado con columnas mínimas
-    import pandas as pd
-    data = {
-        "strike": [9000],
-        "last": [120.5],
-        "bid": [120],
-        "ask": [121],
-        "expiration": [pd.Timestamp("2025-02-28")],
-        "kind": ["CALL"],
-    }
-    df = pd.DataFrame(data)
-    df.index = ["GFGC9000DI"]  # símbolo de la opción
-
-    df_with = hb_service._attach_greeks(df)
-    return dataframe_to_records(df_with)
 
 
 @app.get("/status/connection")
