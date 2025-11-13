@@ -302,6 +302,26 @@ def get_cauciones():
         raise HTTPException(status_code=500, detail=f"Error obteniendo cauciones: {str(e)}")
 
 
+import pandas as pd
+
+@app.get("/options/test_greeks")
+def test_greeks():
+    # DataFrame simulado con columnas mínimas
+    data = {
+        "strike": [9000],
+        "last": [120.5],
+        "bid": [120],
+        "ask": [121],
+        "expiration": [pd.Timestamp("2025-02-28")],
+        "kind": ["CALL"],
+    }
+    df = pd.DataFrame(data)
+    df.index = ["GFGC9000DI"]  # símbolo de la opción
+
+    df_with = hb_service._attach_greeks(df)
+    return dataframe_to_records(df_with)
+
+
 @app.get("/status/connection")
 def get_connection_status():
     """
