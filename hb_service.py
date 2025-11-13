@@ -9,23 +9,18 @@ from typing import Dict, List, Any, Optional
 import pandas as pd
 from pyhomebroker import HomeBroker
 from dotenv import load_dotenv
-from zoneinfo import ZoneInfo 
+from zoneinfo import ZoneInfo
+from greeks import implied_vol, bs_greeks  # <- tus funciones de IV y griegas
 
-# Configurar logging estructurado
+# Configurar logging estructurado (una sola vez)
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
+# Zona horaria global
 TZ = ZoneInfo("America/Argentina/Buenos_Aires")
-
-# Configurar logging estructurado
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 
 def _read_json_if_exists(path: str) -> Optional[Dict[str, Any]]:
@@ -97,7 +92,7 @@ class HBService:
         self.password = os.getenv("HB_PASSWORD", "")
         self.option_prefixes: List[str] = _load_option_prefixes_env_then_file()
         self.stock_prefixes: List[str] = _load_stock_prefixes_env_then_file()
-        
+
         # Configuración de reconexión
         self.reconnect_interval = int(os.getenv("HB_RECONNECT_INTERVAL", "30"))  # segundos
         self.max_reconnect_attempts = int(os.getenv("HB_MAX_RECONNECT_ATTEMPTS", "5"))
@@ -111,8 +106,8 @@ class HBService:
         # Sincronización y estado de conexión
         self._lock = threading.RLock()
         self._hb: Optional[HomeBroker] = None
-        self._thread: threading.Thread | None = None
-        self._health_thread: threading.Thread | None = None
+        self._thread: Optional[threading.Thread] = None
+        self._health_thread: Optional[threading.Thread] = None
         self._connected = False
         self._last_data_received = datetime.now()
         self._connection_attempts = 0
@@ -126,38 +121,37 @@ class HBService:
             try:
                 # Actualizar timestamp de última recepción de datos
                 self._last_data_received = datetime.now()
-                
+
                 if quotes.empty:
                     return
-                    
+
                 this_data = quotes.copy()
+                # NO dropeamos expiration/strike/kind porque las necesitamos para IV/griegas
                 # this_data = this_data.drop(["expiration", "strike", "kind"], axis=1, errors='ignore')
                 this_data["change"] = this_data["change"] / 100
                 this_data["datetime"] = pd.to_datetime(this_data["datetime"])
                 this_data = this_data.rename(columns={"bid_size": "bidsize", "ask_size": "asksize"})
-                
+
                 # Filtrado por prefijos si están configurados
                 if self.option_prefixes and not this_data.empty:
-                    # Asegurar que el índice sea string para el filtrado
                     idx = this_data.index.astype(str)
                     mask = pd.Series(False, index=this_data.index)
                     for prefix in self.option_prefixes:
                         if prefix:
                             mask = mask | idx.str.startswith(prefix)
                     this_data = this_data[mask]
-                
+
                 if not this_data.empty:
                     # Agregar símbolos nuevos que cumplan el filtro
                     new_index = this_data.index.difference(self.options.index)
                     if len(new_index) > 0:
-                        # Filtrar solo las filas que realmente tienen datos antes de concatenar
                         new_data = this_data.loc[new_index]
                         if not new_data.empty:
                             self.options = pd.concat([self.options, new_data], axis=0)
                     # Actualizar existentes
                     self.options.update(this_data)
                     logger.debug(f"Actualizadas {len(this_data)} opciones")
-                    
+
             except Exception as e:
                 logger.error(f"Error en _on_options: {e}")
                 # Continuar sin fallar
@@ -165,12 +159,11 @@ class HBService:
     def _on_securities(self, online, quotes):
         with self._lock:
             try:
-                # Actualizar timestamp de última recepción de datos
                 self._last_data_received = datetime.now()
-                
+
                 if quotes.empty:
                     return
-                    
+
                 this_data = quotes.copy()
                 this_data = this_data.reset_index()
                 this_data["symbol"] = this_data["symbol"] + " - " + this_data["settlement"]
@@ -180,7 +173,7 @@ class HBService:
                 this_data["datetime"] = pd.to_datetime(this_data["datetime"])
                 self.everything.update(this_data)
                 logger.debug(f"Actualizados {len(this_data)} securities")
-                
+
             except Exception as e:
                 logger.error(f"Error en _on_securities: {e}")
                 # Continuar sin fallar
@@ -188,12 +181,11 @@ class HBService:
     def _on_repos(self, online, quotes):
         with self._lock:
             try:
-                # Actualizar timestamp de última recepción de datos
                 self._last_data_received = datetime.now()
-                
+
                 if quotes.empty:
                     return
-                    
+
                 this_data = quotes.copy()
                 this_data = this_data.reset_index()
                 this_data = this_data.set_index("symbol")
@@ -205,14 +197,15 @@ class HBService:
                 this_data["bid_rate"] = this_data["bid_rate"] / 100
                 this_data["ask_rate"] = this_data["ask_rate"] / 100
                 this_data = this_data.drop(
-                    ["open", "high", "low", "volume", "operations", "datetime"], axis=1
+                    ["open", "high", "low", "volume", "operations", "datetime"],
+                    axis=1,
                 )
                 this_data = this_data[
                     ["last", "turnover", "bid_amount", "bid_rate", "ask_rate", "ask_amount"]
                 ]
                 self.cauciones.update(this_data)
                 logger.debug(f"Actualizadas {len(this_data)} cauciones")
-                
+
             except Exception as e:
                 logger.error(f"Error en _on_repos: {e}")
                 # Continuar sin fallar
@@ -220,11 +213,11 @@ class HBService:
     def _on_error(self, online, error):
         """Manejo de errores de HomeBroker con reconexión automática"""
         logger.error(f"HomeBroker error: {error}")
-        
+
         # Marcar como desconectado para que el health monitor lo detecte
         with self._lock:
             self._connected = False
-        
+
         # El health monitor se encargará de la reconexión
 
     # -----------------------
@@ -234,14 +227,14 @@ class HBService:
         """Conecta a HomeBroker y se suscribe a los feeds. Retorna True si tuvo éxito."""
         try:
             logger.info("Iniciando conexión a HomeBroker...")
-            
+
             # Desconectar conexión previa si existe
             if self._hb:
                 try:
                     self._hb.online.disconnect()
                 except Exception:
                     pass
-            
+
             hb = HomeBroker(
                 int(self.broker_id),
                 on_options=self._on_options,
@@ -249,15 +242,15 @@ class HBService:
                 on_repos=self._on_repos,
                 on_error=self._on_error,
             )
-            
+
             # Autenticación
             logger.info(f"Autenticando con DNI: {self.dni}")
             hb.auth.login(dni=self.dni, user=self.user, password=self.password, raise_exception=True)
-            
+
             # Conexión online
             logger.info("Conectando online...")
             hb.online.connect()
-            
+
             # Suscripciones
             logger.info("Suscribiendo a feeds de datos...")
             hb.online.subscribe_options()
@@ -276,10 +269,10 @@ class HBService:
                 self._connected = True
                 self._last_data_received = datetime.now()
                 self._connection_attempts = 0
-                
+
             logger.info("✅ Conexión a HomeBroker exitosa")
             return True
-            
+
         except Exception as e:
             logger.error(f"❌ Error conectando a HomeBroker: {e}")
             with self._lock:
@@ -290,68 +283,79 @@ class HBService:
     def _health_monitor(self) -> None:
         """Monitor de salud que verifica la conexión y reconecta automáticamente"""
         logger.info("Iniciando monitor de salud...")
-        
+
         while not self._should_stop:
             try:
-                # Verificar si han pasado demasiado tiempo sin recibir datos
                 time_since_last_data = datetime.now() - self._last_data_received
-                
+
                 # Si no hemos recibido datos en los últimos 5 minutos, reconectar
                 if time_since_last_data > timedelta(minutes=5):
-                    logger.warning(f"Sin datos por {time_since_last_data.seconds} segundos. Intentando reconexión...")
+                    logger.warning(
+                        f"Sin datos por {time_since_last_data.seconds} segundos. Intentando reconexión..."
+                    )
                     self._attempt_reconnection()
-                
+
                 # Si no estamos conectados, intentar reconectar
                 elif not self._connected:
                     logger.warning("Conexión perdida. Intentando reconexión...")
                     self._attempt_reconnection()
-                
-                # Esperar antes del próximo chequeo
+
                 time.sleep(self.health_check_interval)
-                
+
             except Exception as e:
                 logger.error(f"Error en health monitor: {e}")
                 time.sleep(self.health_check_interval)
-    
+
     def _attempt_reconnection(self) -> None:
         """Intenta reconectar hasta el límite máximo de intentos"""
         if self._connection_attempts >= self.max_reconnect_attempts:
-            logger.error(f"Máximo de intentos de reconexión alcanzado ({self.max_reconnect_attempts})")
-            time.sleep(self.reconnect_interval * 2)  # Esperar más tiempo antes de resetear
-            self._connection_attempts = 0  # Resetear contador
+            logger.error(
+                f"Máximo de intentos de reconexión alcanzado ({self.max_reconnect_attempts})"
+            )
+            time.sleep(self.reconnect_interval * 2)
+            self._connection_attempts = 0
             return
-        
-        logger.info(f"Intento de reconexión {self._connection_attempts + 1}/{self.max_reconnect_attempts}")
-        
+
+        logger.info(
+            f"Intento de reconexión {self._connection_attempts + 1}/{self.max_reconnect_attempts}"
+        )
+
         if self._connect_and_subscribe():
             logger.info("🔄 Reconexión exitosa")
         else:
-            logger.warning(f"Reconexión fallida. Reintentando en {self.reconnect_interval} segundos...")
+            logger.warning(
+                f"Reconexión fallida. Reintentando en {self.reconnect_interval} segundos..."
+            )
             time.sleep(self.reconnect_interval)
 
     def start(self) -> None:
         """Inicia el servicio de HomeBroker con monitoreo automático"""
         logger.info("Iniciando servicio de HomeBroker...")
-        
-        # Resetear flag de parada
+
         self._should_stop = False
-        
-        # Iniciar conexión principal
+
         if not (self._thread and self._thread.is_alive()):
-            self._thread = threading.Thread(target=self._connect_and_subscribe, name="hb-thread", daemon=False)
+            self._thread = threading.Thread(
+                target=self._connect_and_subscribe,
+                name="hb-thread",
+                daemon=False,
+            )
             self._thread.start()
-        
-        # Iniciar monitor de salud
+
         if not (self._health_thread and self._health_thread.is_alive()):
-            self._health_thread = threading.Thread(target=self._health_monitor, name="hb-health", daemon=False)
+            self._health_thread = threading.Thread(
+                target=self._health_monitor,
+                name="hb-health",
+                daemon=False,
+            )
             self._health_thread.start()
 
     def stop(self) -> None:
         """Detiene el servicio de HomeBroker completamente"""
         logger.info("Deteniendo servicio de HomeBroker...")
-        
+
         self._should_stop = True
-        
+
         with self._lock:
             if self._hb:
                 try:
@@ -362,103 +366,90 @@ class HBService:
             self._connected = False
 
     # -----------------------
-    # Lectura
+    # Lectura base
     # -----------------------
     def get_options(self, prefix: Optional[str] = None, ticker: Optional[str] = None) -> pd.DataFrame:
         """
         Obtiene opciones con filtros opcionales.
-        
-        Args:
-            prefix: Filtrar por prefijo (ej: 'GFG')
-            ticker: Filtrar por ticker específico
         """
         with self._lock:
             df = self.options.copy()
-            
+
             if ticker:
-                # Filtrar por ticker exacto
                 df = df[df.index.astype(str) == ticker.upper()]
             elif prefix:
-                # Filtrar por prefijo
                 df = df[df.index.astype(str).str.startswith(prefix.upper())]
             elif self.option_prefixes:
-                # Aplicar filtros configurados por defecto SOLO si no se especifica nada
-                # Esto permite acceso completo cuando se solicita explícitamente
                 mask = pd.Series(False, index=df.index)
                 for pref in self.option_prefixes:
                     if pref:
                         mask = mask | df.index.astype(str).str.startswith(pref.upper())
                 df = df[mask]
-            # Si no hay filtros, retornar TODAS las opciones disponibles
-                
+
             return df
 
     def get_securities(self, ticker: Optional[str] = None, type: Optional[str] = None) -> pd.DataFrame:
         """
         Obtiene securities con filtros opcionales.
-        
-        Args:
-            ticker: Filtrar por ticker
-            type: Filtrar por tipo (acciones, bonos, cedears, etc.)
         """
         with self._lock:
             df = self.everything.copy()
-            
+
             if ticker:
-                # Filtrar por ticker (puede ser parcial)
                 df = df[df.index.astype(str).str.contains(ticker.upper(), na=False)]
             elif type:
-                # Filtrar por tipo basado en el índice
                 type_mapping = {
-                    'acciones': [' - 24hs', ' - SPOT'],
-                    'bonos': [' - 24hs', ' - SPOT'],
-                    'cedears': [' - 24hs', ' - SPOT'],
-                    'letras': [' - 24hs', ' - SPOT'],
-                    'ons': [' - 24hs', ' - SPOT'],
-                    'panel_general': [' - 24hs', ' - SPOT']
+                    "acciones": [" - 24hs", " - SPOT"],
+                    "bonos": [" - 24hs", " - SPOT"],
+                    "cedears": [" - 24hs", " - SPOT"],
+                    "letras": [" - 24hs", " - SPOT"],
+                    "ons": [" - 24hs", " - SPOT"],
+                    "panel_general": [" - 24hs", " - SPOT"],
                 }
                 if type in type_mapping:
                     suffixes = type_mapping[type]
-                    mask = df.index.astype(str).str.contains('|'.join(suffixes), na=False)
+                    mask = df.index.astype(str).str.contains("|".join(suffixes), na=False)
                     df = df[mask]
-            # Si no hay filtros, retornar TODOS los securities disponibles
-                    
+
             return df
 
     def get_stocks(self, prefix: Optional[str] = None, ticker: Optional[str] = None) -> pd.DataFrame:
         """
         Obtiene acciones (stocks) con filtros opcionales, similar a get_options.
-        
-        Args:
-            prefix: Filtrar por prefijo (ej: 'GGAL')
-            ticker: Filtrar por ticker específico
         """
         with self._lock:
-            # Filtrar solo acciones del DataFrame everything
             df = self.everything.copy()
-            
-            # Filtrar por acciones (que tengan sufijos de 24hs o SPOT)
-            action_suffixes = [' - 24hs', ' - SPOT']
-            mask = df.index.astype(str).str.contains('|'.join(action_suffixes), na=False)
+
+            action_suffixes = [" - 24hs", " - SPOT"]
+            mask = df.index.astype(str).str.contains("|".join(action_suffixes), na=False)
             df = df[mask]
-            
+
             if ticker:
-                # Filtrar por ticker exacto (sin el sufijo)
-                df = df[df.index.astype(str).str.replace(' - 24hs', '').str.replace(' - SPOT', '') == ticker.upper()]
+                df = df[
+                    df.index.astype(str)
+                    .str.replace(" - 24hs", "")
+                    .str.replace(" - SPOT", "")
+                    == ticker.upper()
+                ]
             elif prefix:
-                # Filtrar por prefijo (sin el sufijo)
-                df = df[df.index.astype(str).str.replace(' - 24hs', '').str.replace(' - SPOT', '').str.startswith(prefix.upper())]
+                df = df[
+                    df.index.astype(str)
+                    .str.replace(" - 24hs", "")
+                    .str.replace(" - SPOT", "")
+                    .str.startswith(prefix.upper())
+                ]
             elif self.stock_prefixes:
-                # Aplicar filtros configurados por defecto SOLO si no se especifica nada
-                # Esto permite acceso completo cuando se solicita explícitamente
                 mask = pd.Series(False, index=df.index)
+                clean_index = (
+                    df.index.astype(str)
+                    .str.replace(" - 24hs", "")
+                    .str.replace(" - SPOT", "")
+                )
                 for pref in self.stock_prefixes:
                     if pref:
-                        clean_index = df.index.astype(str).str.replace(' - 24hs', '').str.replace(' - SPOT', '')
                         mask = mask | clean_index.str.startswith(pref.upper())
                 df = df[mask]
-            # Si no hay filtros, retornar TODAS las acciones disponibles
-                
+
             return df
 
     def get_cauciones(self) -> pd.DataFrame:
@@ -470,16 +461,15 @@ class HBService:
         with self._lock:
             if not self._connected:
                 return False
-            
-            # Verificar si hemos recibido datos recientemente
+
             time_since_last_data = datetime.now() - self._last_data_received
-            return time_since_last_data < timedelta(minutes=10)  # 10 minutos es el límite
-    
+            return time_since_last_data < timedelta(minutes=10)
+
     def get_connection_status(self) -> Dict[str, Any]:
         """Obtiene información detallada del estado de conexión"""
         with self._lock:
             time_since_last_data = datetime.now() - self._last_data_received
-            
+
             return {
                 "connected": self._connected,
                 "receiving_data": time_since_last_data < timedelta(minutes=5),
@@ -488,19 +478,12 @@ class HBService:
                 "connection_attempts": self._connection_attempts,
                 "max_reconnect_attempts": self.max_reconnect_attempts,
                 "reconnect_interval": self.reconnect_interval,
-                "health_check_interval": self.health_check_interval
+                "health_check_interval": self.health_check_interval,
             }
-            
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    from greeks import implied_vol, bs_greeks
-
-    TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 
     # -----------------------
-    # Cálculo de tasas y subyacentes
+    # Cálculo tasas, subyacente e IV/griegas
     # -----------------------
-   
     def _get_caucion_1d_rate(self) -> Optional[float]:
         """
         Devuelve tasa de caución '1D' aprox a partir de self.cauciones.
@@ -508,59 +491,45 @@ class HBService:
         """
         if self.cauciones.empty:
             return None
-        
-        # self.cauciones tiene índice = settlement (fecha)
+
         df = self.cauciones.copy()
-        df = df.sort_index()  # la primera es la de plazo más corto
+        df = df.sort_index()
         row = df.iloc[0]
-        
-        # En _on_repos hiciste: last, bid_rate, ask_rate ya en decimales
-        # Last suele ser tasa promedio/cierre
+
         rate = row.get("last")
         if rate is None:
-            # fallback: usar bid_rate o ask_rate
             rate = row.get("bid_rate") or row.get("ask_rate")
-        
+
         if rate is None:
             return None
-        
-        # rate viene en decimales (ej 0.80 = 80% anual)
+
         return float(rate)
 
     def _get_underlying_price(self, option_symbol: str) -> Optional[float]:
         """
         Estima el ticker del subyacente a partir del símbolo de la opción y devuelve su last.
-        
-        💡 Esto depende de tu convención de símbolos. Acá te dejo una heurística:
-        - Toma las primeras 4 letras del símbolo como prefijo (ej: GFGC -> GGAL, YPFC -> YPF)
-        - Las mapea a un ticker real.
         """
         if not option_symbol:
             return None
-        
-        sym = str(option_symbol).upper()
-        pref = sym[:4]  # Ej 'GFGC', 'YPFC', etc.
 
-        # 📝 TODO: ajustar este mapping a tu realidad (puede ir a partir de tickers.json)
+        sym = str(option_symbol).upper()
+        pref = sym[:4]
+
         mapping = {
             "GFGC": "GGAL",
             "GFGV": "GGAL",
             "YPFC": "YPFD",
-            # Agregar más mappings...
+            # agregar más mappings según tus series
         }
-        
+
         underlying_ticker = mapping.get(pref)
         if not underlying_ticker:
             return None
-        
-        # Usamos get_stocks para encontrar el subyacente
+
         stocks_df = self.get_stocks(ticker=underlying_ticker)
         if stocks_df.empty:
             return None
-        
-        # Tomamos cualquiera (de 24hs o SPOT), preferentemente 24hs
-        # El index tiene formato 'GGAL - 24hs' / 'GGAL - SPOT'
-        # Nos quedamos con el primero
+
         row = stocks_df.iloc[0]
         last = row.get("last")
         return float(last) if last is not None else None
@@ -572,23 +541,21 @@ class HBService:
         """
         if df.empty:
             return df
-        
+
         df = df.copy()
         now = datetime.now(TZ)
-        r = self._get_caucion_1d_rate() or 0.0  # si no hay tasa, usamos 0
-        
-        # Preparamos nuevas columnas
+        r = self._get_caucion_1d_rate() or 0.0
+
         df["underlying_price"] = None
         df["iv"] = None
         df["delta"] = None
         df["gamma"] = None
         df["vega"] = None
         df["theta"] = None
-        
-        # Aseguramos que expiration esté como datetime
+
         if "expiration" in df.columns:
             df["expiration"] = pd.to_datetime(df["expiration"], errors="coerce")
-        
+
         for idx, row in df.iterrows():
             try:
                 symbol = str(idx)
@@ -597,19 +564,16 @@ class HBService:
                 ask = row.get("ask")
                 strike = row.get("strike")
                 expiration = row.get("expiration")
-                kind = row.get("kind")  # Puede ser 'CALL' / 'PUT' / 'C' / 'V'
-                
-                # Precio subyacente S
+                kind = row.get("kind")
+
                 S = self._get_underlying_price(symbol)
                 if S is None or S <= 0:
                     continue
-                
-                # Strike
+
                 if strike is None or strike <= 0:
                     continue
                 K = float(strike)
-                
-                # Tiempo a vencimiento T en años
+
                 if expiration is None or pd.isna(expiration):
                     continue
                 exp_dt = expiration.to_pydatetime().replace(tzinfo=TZ)
@@ -617,55 +581,40 @@ class HBService:
                 if days <= 0:
                     continue
                 T = days / 365.0
-                
-                # Tipo de opción
+
                 if isinstance(kind, str):
                     k = kind.upper()
-                    if k.startswith("C"):
-                        opt_type = "C"
-                    else:
-                        opt_type = "P"
+                    opt_type = "C" if k.startswith("C") else "P"
                 else:
-                    # fallback: inferir del símbolo (último carácter?)
                     opt_type = "C" if symbol.endswith("C") else "P"
-                
-                # Precio para IV: preferimos mid, después last
+
                 price_for_iv = None
                 if bid is not None and ask is not None and bid > 0 and ask > 0:
                     price_for_iv = 0.5 * (float(bid) + float(ask))
                 elif last is not None and last > 0:
                     price_for_iv = float(last)
-                
+
                 if price_for_iv is None:
                     continue
-                
-                # Calcular IV
+
                 sigma = implied_vol(price_for_iv, S, K, T, r, opt_type)
                 if sigma is None:
                     continue
-                
+
                 greeks = bs_greeks(S, K, T, r, sigma, opt_type)
-                
+
                 df.at[idx, "underlying_price"] = S
                 df.at[idx, "iv"] = sigma
                 df.at[idx, "delta"] = greeks["delta"]
                 df.at[idx, "gamma"] = greeks["gamma"]
                 df.at[idx, "vega"] = greeks["vega"]
                 df.at[idx, "theta"] = greeks["theta"]
-            
+
             except Exception as e:
                 logger.error(f"Error calculando griegas para {idx}: {e}")
                 continue
-        
-        return df
 
-    def get_options_with_greeks(self, prefix: Optional[str] = None,
-                                ticker: Optional[str] = None) -> pd.DataFrame:
-        """
-        Igual que get_options, pero con columnas de subyacente + IV + griegas.
-        """
-        base_df = self.get_options(prefix=prefix, ticker=ticker)
-        return self._attach_greeks(base_df)
+        return df
 
 
 # Instancia singleton para usar desde la API
@@ -676,48 +625,43 @@ def dataframe_to_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     """Convierte DataFrame a lista de dicts con fechas serializadas a ISO-8601."""
     try:
         safe_df = df.reset_index()
-        
-        # Reemplaza valores problemáticos para JSON
+
         for col in safe_df.columns:
-            if safe_df[col].dtype in ['float64', 'float32']:
-                # Reemplaza inf, -inf, NaN por None
-                safe_df[col] = safe_df[col].replace([float('inf'), float('-inf')], None)
+            if safe_df[col].dtype in ["float64", "float32"]:
+                safe_df[col] = safe_df[col].replace([float("inf"), float("-inf")], None)
                 safe_df[col] = safe_df[col].where(pd.notna(safe_df[col]), None)
-                
-                # Reemplaza valores muy grandes por None
                 safe_df[col] = safe_df[col].apply(
-                    lambda x: None if isinstance(x, (int, float)) and (abs(x) > 1e15 or x == 0 and pd.isna(x)) else x
+                    lambda x: None
+                    if isinstance(x, (int, float))
+                    and (abs(x) > 1e15 or (x == 0 and pd.isna(x)))
+                    else x
                 )
-            elif safe_df[col].dtype in ['int64', 'int32']:
-                # Reemplaza valores muy grandes por None
+            elif safe_df[col].dtype in ["int64", "int32"]:
                 safe_df[col] = safe_df[col].apply(
                     lambda x: None if isinstance(x, (int, float)) and abs(x) > 1e15 else x
                 )
-        
-        # Reemplaza NaN/NaT por None para JSON válido
+
         safe_df = safe_df.where(pd.notna(safe_df), None)
-        
+
         result = safe_df.to_dict(orient="records")
-        
-        # Limpia valores problemáticos en el resultado final
+
         for row in result:
             for key, value in list(row.items()):
                 if isinstance(value, pd.Timestamp):
                     row[key] = value.isoformat()
                 elif isinstance(value, (int, float)):
-                    if pd.isna(value) or value == float('inf') or value == float('-inf') or abs(value) > 1e15:
+                    if (
+                        pd.isna(value)
+                        or value == float("inf")
+                        or value == float("-inf")
+                        or abs(value) > 1e15
+                    ):
                         row[key] = None
-                elif value == "nan" or value == "inf" or value == "-inf":
+                elif value in ("nan", "inf", "-inf"):
                     row[key] = None
-                    
+
         return result
-        
+
     except Exception as e:
         print(f"Error serializando DataFrame: {e}")
-        # Retorna lista vacía en caso de error
         return []
-
-    
-    
-
-
