@@ -9,6 +9,17 @@ from typing import Dict, List, Any, Optional
 import pandas as pd
 from pyhomebroker import HomeBroker
 from dotenv import load_dotenv
+from zoneinfo import ZoneInfo 
+
+# Configurar logging estructurado
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# 👇 DEFINIR TZ A NIVEL GLOBAL (SIN INDENTACIÓN)
+TZ = ZoneInfo("America/Argentina/Buenos_Aires")
 
 # Configurar logging estructurado
 logging.basicConfig(
