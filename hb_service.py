@@ -170,12 +170,12 @@ class HBService:
                 this_data["symbol"] = this_data["symbol"] + " - " + this_data["settlement"]
                 this_data = this_data.drop(["settlement"], axis=1)
                 this_data = this_data.set_index("symbol")
-                this_data["change"] = self_data["change"] / 100
+                this_data["change"] = this_data["change"] / 100   # 👈 acá estaba el bug
                 this_data["datetime"] = pd.to_datetime(this_data["datetime"])
                 
-                # 👉 PRIMERO agregamos filas nuevas, LUEGO update
+                # Primera carga o actualización incremental
                 if self.everything.empty:
-                    # Primera vez: simplemente asignamos todo
+                    # Primera vez: asignamos todo
                     self.everything = this_data
                 else:
                     # Agregar símbolos nuevos
@@ -185,7 +185,7 @@ class HBService:
                         if not new_data.empty:
                             self.everything = pd.concat([self.everything, new_data], axis=0)
                     
-                    # Actualizar símbolos existentes
+                    # Actualizar símbolos ya existentes
                     self.everything.update(this_data)
 
                 logger.debug(f"Actualizados {len(this_data)} securities")
@@ -193,7 +193,6 @@ class HBService:
             except Exception as e:
                 logger.error(f"Error en _on_securities: {e}")
                 # Continuar sin fallar
-
 
 
 
