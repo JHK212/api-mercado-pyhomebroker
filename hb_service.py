@@ -157,43 +157,42 @@ class HBService:
                 # Continuar sin fallar
 
     def _on_securities(self, online, quotes):
-    with self._lock:
-        try:
-            # Actualizar timestamp de última recepción de datos
-            self._last_data_received = datetime.now()
-            
-            if quotes.empty:
-                return
+        with self._lock:
+            try:
+                # Actualizar timestamp de última recepción de datos
+                self._last_data_received = datetime.now()
                 
-            this_data = quotes.copy()
-            this_data = this_data.reset_index()
-            this_data["symbol"] = this_data["symbol"] + " - " + this_data["settlement"]
-            this_data = this_data.drop(["settlement"], axis=1)
-            this_data = this_data.set_index("symbol")
-            this_data["change"] = this_data["change"] / 100
-            this_data["datetime"] = pd.to_datetime(this_data["datetime"])
-            
-            # 👉 PRIMERO agregamos filas nuevas, LUEGO update
-            if self.everything.empty:
-                # Primera vez: simplemente asignamos todo
-                self.everything = this_data
-            else:
-                # Agregar símbolos nuevos
-                new_index = this_data.index.difference(self.everything.index)
-                if len(new_index) > 0:
-                    new_data = this_data.loc[new_index]
-                    if not new_data.empty:
-                        self.everything = pd.concat([self.everything, new_data], axis=0)
+                if quotes.empty:
+                    return
                 
-                # Actualizar símbolos existentes
-                self.everything.update(this_data)
+                this_data = quotes.copy()
+                this_data = this_data.reset_index()
+                this_data["symbol"] = this_data["symbol"] + " - " + this_data["settlement"]
+                this_data = this_data.drop(["settlement"], axis=1)
+                this_data = this_data.set_index("symbol")
+                this_data["change"] = self_data["change"] / 100
+                this_data["datetime"] = pd.to_datetime(this_data["datetime"])
+                
+                # 👉 PRIMERO agregamos filas nuevas, LUEGO update
+                if self.everything.empty:
+                    # Primera vez: simplemente asignamos todo
+                    self.everything = this_data
+                else:
+                    # Agregar símbolos nuevos
+                    new_index = this_data.index.difference(self.everything.index)
+                    if len(new_index) > 0:
+                        new_data = this_data.loc[new_index]
+                        if not new_data.empty:
+                            self.everything = pd.concat([self.everything, new_data], axis=0)
+                    
+                    # Actualizar símbolos existentes
+                    self.everything.update(this_data)
 
-            logger.debug(f"Actualizados {len(this_data)} securities")
+                logger.debug(f"Actualizados {len(this_data)} securities")
             
-        except Exception as e:
-            logger.error(f"Error en _on_securities: {e}")
-            # Continuar sin fallar
-
+            except Exception as e:
+                logger.error(f"Error en _on_securities: {e}")
+                # Continuar sin fallar
 
 
 
@@ -202,49 +201,48 @@ class HBService:
 
     
     def _on_repos(self, online, quotes):
-    with self._lock:
-        try:
-            # Actualizar timestamp de última recepción de datos
-            self._last_data_received = datetime.now()
-            
-            if quotes.empty:
-                return
+        with self._lock:
+            try:
+                # Actualizar timestamp de última recepción de datos
+                self._last_data_received = datetime.now()
                 
-            this_data = quotes.copy()
-            this_data = this_data.reset_index()
-            this_data = this_data.set_index("symbol")
-            this_data = this_data[["PESOS" in s for s in quotes.index]]
-            this_data = this_data.reset_index()
-            this_data["settlement"] = pd.to_datetime(this_data["settlement"])
-            this_data = this_data.set_index("settlement")
-            this_data["last"] = this_data["last"] / 100
-            this_data["bid_rate"] = this_data["bid_rate"] / 100
-            this_data["ask_rate"] = this_data["ask_rate"] / 100
-            this_data = this_data.drop(
-                ["open", "high", "low", "volume", "operations", "datetime"], axis=1
-            )
-            this_data = this_data[
-                ["last", "turnover", "bid_amount", "bid_rate", "ask_rate", "ask_amount"]
-            ]
-            
-            # 👉 Igual idea: agregar filas nuevas y luego actualizar
-            if self.cauciones.empty:
-                self.cauciones = this_data
-            else:
-                new_index = this_data.index.difference(self.cauciones.index)
-                if len(new_index) > 0:
-                    new_data = this_data.loc[new_index]
-                    if not new_data.empty:
-                        self.cauciones = pd.concat([self.cauciones, new_data], axis=0)
+                if quotes.empty:
+                    return
                 
-                self.cauciones.update(this_data)
+                this_data = quotes.copy()
+                this_data = this_data.reset_index()
+                this_data = this_data.set_index("symbol")
+                this_data = this_data[["PESOS" in s for s in quotes.index]]
+                this_data = this_data.reset_index()
+                this_data["settlement"] = pd.to_datetime(this_data["settlement"])
+                this_data = this_data.set_index("settlement")
+                this_data["last"] = this_data["last"] / 100
+                this_data["bid_rate"] = this_data["bid_rate"] / 100
+                this_data["ask_rate"] = this_data["ask_rate"] / 100
+                this_data = this_data.drop(
+                    ["open", "high", "low", "volume", "operations", "datetime"], axis=1
+                )
+                this_data = this_data[
+                    ["last", "turnover", "bid_amount", "bid_rate", "ask_rate", "ask_amount"]
+                ]
+                
+                # 👉 Igual idea: agregar filas nuevas y luego actualizar
+                if self.cauciones.empty:
+                    self.cauciones = this_data
+                else:
+                    new_index = this_data.index.difference(self.cauciones.index)
+                    if len(new_index) > 0:
+                        new_data = this_data.loc[new_index]
+                        if not new_data.empty:
+                            self.cauciones = pd.concat([self.cauciones, new_data], axis=0)
+                    
+                    self.cauciones.update(this_data)
 
-            logger.debug(f"Actualizadas {len(this_data)} cauciones")
+                logger.debug(f"Actualizadas {len(this_data)} cauciones")
             
-        except Exception as e:
-            logger.error(f"Error en _on_repos: {e}")
-            # Continuar sin fallar
-
+            except Exception as e:
+                logger.error(f"Error en _on_repos: {e}")
+                # Continuar sin fallar
 
     def _on_error(self, online, error):
         """Manejo de errores de HomeBroker con reconexión automática"""
