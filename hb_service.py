@@ -421,6 +421,26 @@ class HBService:
 
             return df
 
+
+    def get_options_with_greeks(
+        self,
+        prefix: Optional[str] = None,
+        ticker: Optional[str] = None
+    ) -> pd.DataFrame:
+        """
+        Igual que get_options, pero le agrega:
+        underlying_price, iv, delta, gamma, vega, theta.
+        """
+        # Reutilizamos el filtro normal
+        base_df = self.get_options(prefix=prefix, ticker=ticker)
+
+        if base_df.empty:
+            return base_df
+
+        # Adjuntamos subyacente, IV y griegas
+        enriched = self._attach_greeks(base_df)
+        return enriched
+
     def get_securities(self, ticker: Optional[str] = None, type: Optional[str] = None) -> pd.DataFrame:
         """
         Obtiene securities con filtros opcionales.
