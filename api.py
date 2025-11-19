@@ -97,10 +97,7 @@ def health():
 def get_options(
     prefix: Optional[str] = Query(None, description="Filtrar opciones por prefijo"),
     ticker: Optional[str] = Query(None, description="Filtrar opciones por ticker específico"),
-    with_greeks: bool = Query(
-        False,
-        description="Si es true, incluye precio subyacente, IV y griegas (delta, gamma, vega, theta)"
-    )
+    with_greeks: bool = Query(False, description="Si es true, agrega IV y griegas")
 ):
     """
     Obtiene todas las opciones o filtra por prefijo/ticker.
