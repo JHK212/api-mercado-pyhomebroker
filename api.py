@@ -94,6 +94,7 @@ def health():
 
 
 @app.get("/options")
+
 def get_options(
     prefix: Optional[str] = Query(None, description="Filtrar opciones por prefijo"),
     ticker: Optional[str] = Query(None, description="Filtrar opciones por ticker específico"),
@@ -105,17 +106,33 @@ def get_options(
     - Sin parámetros: retorna todas las opciones (aplicando filtros por defecto)
     - prefix: filtra opciones que empiecen con el prefijo (ej: GFG)
     - ticker: filtra opciones por ticker específico
-    - with_greeks: si es true, agrega columnas de IV y griegas
+    - with_greeks=true: agrega columnas de IV y griegas
     """
     try:
+        df = hb_service.get_options(prefix=prefix, ticker=ticker)
+
         if with_greeks:
-            # 👉 Usa la versión que ya calcula IV y griegas en hb_service
-            df = hb_service.get_options_with_greeks(prefix=prefix, ticker=ticker)
-        else:
-            # 👉 Comportamiento viejo, sin griegas
-            df = hb_service.get_options(prefix=prefix, ticker=ticker)
-        
+            # Calcula IV y griegas
+            df = hb_service._attach_greeks(df)
+
+            # (opcional) aseguramos columna underlying_asset:
+            # si ya la estás seteando en _attach_greeks, esto no hace falta.
+            if "underlying_asset" not in df.columns:
+                # ejemplo simple: tomar prefijo y mapearlo a subyacente
+                # acá podés usar el mismo mapping que en _get_underlying_price
+                df["underlying_asset"] = None
+                for idx in df.index:
+                    sym = str(idx).upper()
+                    pref = sym[:4]
+                    mapping = {
+                        "GFGC": "GGAL",
+                        "GFGV": "GGAL",
+                        "YPFC": "YPFD",
+                    }
+                    df.at[idx, "underlying_asset"] = mapping.get(pref)
+
         return dataframe_to_records(df)
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error obteniendo opciones: {str(e)}")
 
