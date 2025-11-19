@@ -539,24 +539,59 @@ class HBService:
     # -----------------------
     def _get_caucion_1d_rate(self) -> Optional[float]:
         """
-        Devuelve tasa de caución '1D' aprox a partir de self.cauciones.
-        Asumimos que la fila con menor settlement es la de menor plazo.
+        Devuelve una tasa corta (~1D) a partir de self.cauciones.
+
+        Lógica:
+        - Toma self.cauciones, que tiene índice = settlement (fecha de vencimiento).
+        - Filtra filas que tengan una tasa válida.
+        - Ordena por settlement ascendente.
+        - Devuelve la tasa de la fila más cercana (menor plazo disponible).
+    
+        Eso hace que:
+        - Un día normal → use la caución 1D.
+        - Un viernes (cuando la mínima es 3D) → use esa 3D.
         """
         if self.cauciones.empty:
             return None
 
         df = self.cauciones.copy()
-        df = df.sort_index()
-        row = df.iloc[0]
 
-        rate = row.get("last")
-        if rate is None:
-            rate = row.get("bid_rate") or row.get("ask_rate")
+        # Aseguramos que el índice sea datetime (por las dudas)
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index, errors="coerce")
+            df = df[~df.index.isna()]
 
-        if rate is None:
+        if df.empty:
             return None
 
+    # Nos quedamos solo con filas que tengan alguna tasa
+        cols_tasa = []
+        for c in ["last", "bid_rate", "ask_rate"]:
+            if c in df.columns:
+                cols_tasa.append(c)
+        if not cols_tasa:
+            return None
+
+    # Al menos una de las columnas de tasa no nula
+        df = df[df[cols_tasa].notna().any(axis=1)]
+        if df.empty:
+            return None
+
+    # Ordenamos por settlement (índice)
+        df = df.sort_index()
+
+        row = df.iloc[0]  # la de menor plazo
+
+        rate = row.get("last")
+        if rate is None or pd.isna(rate):
+            rate = row.get("bid_rate") or row.get("ask_rate")
+
+        if rate is None or pd.isna(rate):
+            return None
+
+    # Ya viene en decimales (ej 0.20 = 20% anual)
         return float(rate)
+
 
     def _get_underlying_price(self, option_symbol: str) -> Optional[float]:
         """
