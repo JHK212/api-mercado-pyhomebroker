@@ -347,6 +347,19 @@ def get_cauciones():
         raise HTTPException(status_code=500, detail=f"Error obteniendo cauciones: {str(e)}")
 
 
+@app.get("/cauciones/1d")
+def get_caucion_1d():
+    try:
+        rate = hb_service._get_caucion_1d_rate()
+        if rate is None:
+            raise HTTPException(status_code=404, detail="No se pudo determinar tasa de caución 1D")
+        
+        return {"rate": rate}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error obteniendo caución 1D: {str(e)}")
+
 
 
 @app.get("/status/connection")
